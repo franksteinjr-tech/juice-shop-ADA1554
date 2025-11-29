@@ -7,6 +7,8 @@ import fs from 'node:fs'
 import { Readable } from 'node:stream'
 import { finished } from 'node:stream/promises'
 import { type Request, type Response, type NextFunction } from 'express'
+import dns from 'node:dns'
+import net from 'node:net'
 
 import * as security from '../lib/insecurity'
 import { UserModel } from '../models/user'
@@ -24,21 +26,40 @@ const ALLOWED_HOSTNAMES = [
   // add more as appropriate
 ]
 
-// Checks if the URL is safe and allowed
-function isValidImageUrl(urlStr: string): boolean {
+// Checks if the URL is safe and allowed by resolving its IP address
+async function isValidImageUrl(urlStr: string): Promise<boolean> {
   try {
     const urlObj = new URL(urlStr);
     // Only allow http/https protocols
     if (urlObj.protocol !== "https:" && urlObj.protocol !== "http:") return false;
     // Hostname must be allowlisted
     if (!ALLOWED_HOSTNAMES.includes(urlObj.hostname)) return false;
-    // Prevent localhost, loopback, or private IPs
-    const forbiddenHosts = ['localhost', '127.0.0.1'];
-    if (forbiddenHosts.includes(urlObj.hostname)) return false;
-    // Simple regex to block private IPs
-    if (/^10\./.test(urlObj.hostname) ||
-        /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(urlObj.hostname) ||
-        /^192\.168\./.test(urlObj.hostname)) return false;
+
+    // DNS resolve the hostname
+    const addresses = await dns.promises.resolve(urlObj.hostname);
+    for (const addr of addresses) {
+      if (net.isIP(addr)) {
+        // Check for private, loopback, or reserved ranges
+        // IPv4
+        if (
+          addr === '127.0.0.1' ||
+          addr === '0.0.0.0' ||
+          /^10\./.test(addr) ||
+          /^172\.(1[6-9]|2[0-9]|3[0-1])\./.test(addr) ||
+          /^192\.168\./.test(addr)
+        ) {
+          return false;
+        }
+        // IPv6
+        if (
+          addr === '::1' || // loopback
+          addr === '::' || // unspecified
+          addr.startsWith('fc') || addr.startsWith('fd') // Unique local
+        ) {
+          return false;
+        }
+      }
+    }
     return true;
   } catch (e) {
     return false;
@@ -53,7 +74,7 @@ export function profileImageUrlUpload () {
       const loggedInUser = security.authenticatedUsers.get(req.cookies.token)
       if (loggedInUser) {
         try {
-          if (!isValidImageUrl(url)) {
+          if (!(await isValidImageUrl(url))) {
             throw new Error('Invalid image URL: Not allowed or unsafe')
           }
           const response = await fetch(url)
